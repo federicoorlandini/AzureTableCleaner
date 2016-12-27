@@ -3,12 +3,16 @@ using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace AzureTableCleaner
 {
     class Program
     {
+        private readonly static string TempFolderName = "temp";
+        private const int chunckSizeForFile = 100;
+
         static void Main(string[] args)
         {
             var options = ParseArgs(args);
@@ -34,7 +38,17 @@ namespace AzureTableCleaner
             var table = tableClient.GetTableReference("SystemAlerts");
 
             //CreateDummyData(table, 200);
+
+            ProcessTempFiles();
+
+            
             CleanTable(table);
+        }
+
+        private static void ValidateOptions(Options options)
+        {
+            // Nothing to do now
+            return;
         }
 
         private static Options ParseArgs(string[] args)
@@ -69,23 +83,39 @@ namespace AzureTableCleaner
 
         private static void CleanTable(CloudTable table)
         {
-            const int chunckSize = 100;
-
             // Query the table
             var query = new TableQuery<SystemAlertsTableRow>()
                 .Where(TableQuery.GenerateFilterConditionForDate("Timestamp", QueryComparisons.LessThan,
-                       new DateTimeOffset(DateTime.Today)));
+                       new DateTimeOffset(DateTime.Today.AddDays(1))));
 
             var rows = table.ExecuteQuery(query).ToArray();
 
-            var chunks = GroupRows(rows, chunckSize);
+            var chunks = GroupRows(rows, chunckSizeForFile);
 
             var accumulatedCounter = 0;
             foreach(var chunk in chunks)
             {
                 Console.WriteLine("Deleting {0} rows. {1}/{2}", chunk.Length, accumulatedCounter, rows.Length);
-                DeleteRows(chunk, table);
+                //DeleteRows(chunk, table);
+                WriteRowChunkInTempFile(chunk);
                 accumulatedCounter += chunk.Length;
+            }
+        }
+
+        private static void WriteRowChunkInTempFile(SystemAlertsTableRow[] chunk)
+        {
+            // Create the temp folder if it not exists
+            Directory.CreateDirectory(TempFolderName);
+            var tempFileName = Path.GetRandomFileName();
+            var tempFilePath = Path.Combine(Environment.CurrentDirectory + "\\" + TempFolderName, tempFileName);
+
+            using (var file = File.CreateText(tempFilePath))
+            {
+                foreach(var item in chunk)
+                {
+                    // Write on file onlye PartitionKey and RowKey
+                    file.WriteLine(item.PartitionKey + ";" + item.RowKey);
+                }
             }
         }
 
@@ -104,7 +134,9 @@ namespace AzureTableCleaner
             var batchOperation = new TableBatchOperation();
             foreach(var row in rows)
             {
-                batchOperation.Delete(row);
+                var tableEntity = new TableEntity(row.PartitionKey, row.RowKey);
+                tableEntity.ETag = "*";
+                batchOperation.Delete(tableEntity);
             }
 
             table.ExecuteBatch(batchOperation);
@@ -122,6 +154,7 @@ namespace AzureTableCleaner
                     Timestamp = TimeSpan.FromTicks(DateTime.Now.Ticks)
                 };
                 var operation = TableOperation.Insert(entity);
+                Console.WriteLine("Creating dummy item #" + i);
                 table.Execute(operation);
             }
         }
