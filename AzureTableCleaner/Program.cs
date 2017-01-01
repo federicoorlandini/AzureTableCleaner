@@ -11,7 +11,15 @@ namespace AzureTableCleaner
     class Program
     {
         private readonly static string TempFolderName = "temp";
-        private const int chunckSizeForFile = 100;
+
+        // Number max of rows for each query we send to Azure Table
+        private const int MaxNumberOfRowsForEachQuery = 10000;
+
+        // Max number of delete command for each transaction
+        private const int ChunkSizeForTransaction = 100;
+
+        // Max number of rows in each temporary file
+        private const int ChunkSizeForTempFile = 1000;
 
         static void Main(string[] args)
         {
@@ -39,10 +47,113 @@ namespace AzureTableCleaner
 
             //CreateDummyData(table, 200);
 
-            ProcessTempFiles();
+            while (true)
+            {
+                // First, we need to check if there are some temp files waiting to be processed
+                ProcessTempFiles();
 
-            
-            CleanTable(table);
+                // Retrieve the data from the Azure table and create the temp files
+                Log("Reading data from Azure Table");
+                var rows = RetrieveDataFromAzure(table);
+                if (!rows.Any())
+                {
+                    break;
+                }
+
+                // Store the rows in temp files
+                Log("Start writing data in tem files");
+                StoreRowsInTempFiles(rows);
+            }
+
+            //CleanTable(table);
+        }
+
+        private static void ProcessTempFiles()
+        {
+            // Add code here
+        }
+
+        private static SystemAlertsTableRow[] RetrieveDataFromAzure(CloudTable table)
+        {
+            // Construct the projectionQuery to get only "PartitionKey", "RowKey" and "Timestamp"
+            TableQuery<DynamicTableEntity> projectionQuery = new TableQuery<DynamicTableEntity>()
+                .Where(TableQuery.GenerateFilterConditionForDate("Timestamp", QueryComparisons.LessThan, DateTime.Now.Date.AddMonths(-1)))
+                .Take(MaxNumberOfRowsForEachQuery)
+                .Select(new string[] { "PartitionKey", "RowKey", "Timestamp" });
+
+            // Define an entiy resolver to work with the entity after retrieval
+            EntityResolver<SystemAlertsTableRow> resolver = (partitionKey, rowKey, timeStamp, props, etag) => new SystemAlertsTableRow
+            {
+                PartitionKey = partitionKey,
+                RowKey = rowKey,
+                Timestamp = timeStamp
+            };
+
+            var rows = table.ExecuteQuery(projectionQuery, resolver);
+            return rows.ToArray();
+        }
+
+        private static void StoreRowsInTempFiles(SystemAlertsTableRow[] rows)
+        {
+            // We need to:
+            // 1. group the rows by partition key
+            // 2. for each group:
+            //      2a. build chunks of N rows
+            //      2b. write each chunk in a separate temp file
+
+            var groupsByPartitionKey = from row in rows
+                                       group row by row.PartitionKey into grp
+                                       select new RowsGroup { Key = grp.Key, Rows = grp.ToArray() };
+
+            foreach(var groupByPartitionKey in groupsByPartitionKey)
+            {
+                BuildTempFilesForGroupByPartitionKey(groupByPartitionKey);
+            }
+        }
+
+        private static void BuildTempFilesForGroupByPartitionKey(RowsGroup group)
+        {
+            // Let's add a row index for each row in the group
+            var rowsWithIndex = group.Rows
+                .Select((row, index) => new {
+                    Index = index,
+                    Row = row })
+                .ToArray();
+
+            // We split the row group in separate temp files
+            var groupsForTempFiles = from row in rowsWithIndex
+                                     group row by row.Index / ChunkSizeForTempFile into grp
+                                     select new { GroupIndex = grp.Key, Rows = grp.ToArray() };
+
+            // Fro each group, let's build a temp file where store
+            // - PartitionKey
+            // - RowKey
+            // - TimeStamp
+            foreach(var groupForTempFile in groupsForTempFiles)
+            {
+                var tempFileName = GenerateTempFileName();
+                var localFolder = Environment.CurrentDirectory + "\\temp";
+
+                Directory.CreateDirectory(localFolder);
+
+                var tempFileWithPath = Path.Combine(localFolder, tempFileName);
+
+                using (var streamWriter = new StreamWriter(tempFileWithPath))
+                {
+                    foreach(var row in groupForTempFile.Rows)
+                    {
+                        var line = string.Format("{0};{1};{2}", row.Row.PartitionKey, row.Row.RowKey, row.Row.Timestamp);
+                        streamWriter.WriteLine(line);
+                    }
+                }
+            }              
+        }
+
+        private static string GenerateTempFileName()
+        {
+            var tempFileName = Path.GetTempFileName();
+            tempFileName = Path.GetFileNameWithoutExtension(tempFileName) + ".csv";
+            return tempFileName;
         }
 
         private static void ValidateOptions(Options options)
@@ -83,23 +194,20 @@ namespace AzureTableCleaner
 
         private static void CleanTable(CloudTable table)
         {
-            // Query the table
-            var query = new TableQuery<SystemAlertsTableRow>()
-                .Where(TableQuery.GenerateFilterConditionForDate("Timestamp", QueryComparisons.LessThan,
-                       new DateTimeOffset(DateTime.Today.AddDays(1))));
+            
 
-            var rows = table.ExecuteQuery(query).ToArray();
+            //var rows = table.ExecuteQuery(query).ToArray();
 
-            var chunks = GroupRows(rows, chunckSizeForFile);
+            //var chunks = GroupRows(rows, chunckSizeForFile);
 
-            var accumulatedCounter = 0;
-            foreach(var chunk in chunks)
-            {
-                Console.WriteLine("Deleting {0} rows. {1}/{2}", chunk.Length, accumulatedCounter, rows.Length);
-                //DeleteRows(chunk, table);
-                WriteRowChunkInTempFile(chunk);
-                accumulatedCounter += chunk.Length;
-            }
+            //var accumulatedCounter = 0;
+            //foreach(var chunk in chunks)
+            //{
+            //    Console.WriteLine("Deleting {0} rows. {1}/{2}", chunk.Length, accumulatedCounter, rows.Length);
+            //    //DeleteRows(chunk, table);
+            //    WriteRowChunkInTempFile(chunk);
+            //    accumulatedCounter += chunk.Length;
+            //}
         }
 
         private static void WriteRowChunkInTempFile(SystemAlertsTableRow[] chunk)
@@ -111,6 +219,7 @@ namespace AzureTableCleaner
 
             using (var file = File.CreateText(tempFilePath))
             {
+                Log(string.Format("Writing {0} rows in file {1}", chunk.Length, tempFilePath));
                 foreach(var item in chunk)
                 {
                     // Write on file onlye PartitionKey and RowKey
@@ -151,12 +260,18 @@ namespace AzureTableCleaner
                 var entity = new SystemAlertsTableRow {
                     PartitionKey = "a",
                     RowKey = Guid.NewGuid().ToString(),
-                    Timestamp = TimeSpan.FromTicks(DateTime.Now.Ticks)
+                    Timestamp = DateTime.Now
                 };
                 var operation = TableOperation.Insert(entity);
-                Console.WriteLine("Creating dummy item #" + i);
+                Log("Creating dummy item #" + i);
                 table.Execute(operation);
             }
+        }
+
+        private static void Log(string message)
+        {
+            var text = string.Format("[{0}] - {1}", DateTime.Now.ToString(), message);
+            Console.WriteLine(text);
         }
     }
 }
