@@ -10,7 +10,7 @@ namespace AzureTableCleaner
 {
     class Program
     {
-        private readonly static string TempFolderName = "temp";
+        private const string TempFolderName = "temp";
 
         // Number max of rows for each query we send to Azure Table
         private const int MaxNumberOfRowsForEachQuery = 10000;
@@ -20,6 +20,12 @@ namespace AzureTableCleaner
 
         // Max number of rows in each temporary file
         private const int ChunkSizeForTempFile = 1000;
+
+        // The complete path to the temp folder
+        private static string TempFolderPath
+        {
+            get { return Environment.CurrentDirectory + "\\" + TempFolderName; }
+        }
 
         static void Main(string[] args)
         {
@@ -70,7 +76,19 @@ namespace AzureTableCleaner
 
         private static void ProcessTempFiles()
         {
-            // Add code here
+            // Get the list of the file in the temp directory
+            var tempFileList = Directory.GetFiles(TempFolderPath, "*.csv");
+
+            foreach(var tempFile in tempFileList)
+            {
+                var fileProcessor = new TempFileProcessor(tempFile, ChunkSizeForTransaction);
+                fileProcessor.Process();
+            }
+        }
+
+        private static void ProcessTempFile(string tempFile)
+        {
+            
         }
 
         private static SystemAlertsTableRow[] RetrieveDataFromAzure(CloudTable table)
@@ -132,11 +150,10 @@ namespace AzureTableCleaner
             foreach(var groupForTempFile in groupsForTempFiles)
             {
                 var tempFileName = GenerateTempFileName();
-                var localFolder = Environment.CurrentDirectory + "\\temp";
 
-                Directory.CreateDirectory(localFolder);
+                Directory.CreateDirectory(TempFolderPath);
 
-                var tempFileWithPath = Path.Combine(localFolder, tempFileName);
+                var tempFileWithPath = Path.Combine(TempFolderPath, tempFileName);
 
                 using (var streamWriter = new StreamWriter(tempFileWithPath))
                 {
@@ -228,15 +245,15 @@ namespace AzureTableCleaner
             }
         }
 
-        private static SystemAlertsTableRow[][] GroupRows(IEnumerable<SystemAlertsTableRow> rows, int groupSize)
-        {
-            var items = rows
-                .Select((item, index) => new { Item = item, GroupIndex = index / groupSize })
-                .GroupBy(item => item.GroupIndex)
-                .Select(group => group.Select(item => item.Item).ToArray())
-                .ToArray();
-            return items;
-        }
+        //private static SystemAlertsTableRow[][] GroupRows(IEnumerable<SystemAlertsTableRow> rows, int groupSize)
+        //{
+        //    var items = rows
+        //        .Select((item, index) => new { Item = item, GroupIndex = index / groupSize })
+        //        .GroupBy(item => item.GroupIndex)
+        //        .Select(group => group.Select(item => item.Item).ToArray())
+        //        .ToArray();
+        //    return items;
+        //}
 
         private static void DeleteRows(SystemAlertsTableRow[] rows, CloudTable table)
         {
