@@ -1,8 +1,8 @@
 ﻿using Microsoft.Azure;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
+using NLog;
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
@@ -10,16 +10,19 @@ namespace AzureTableCleaner
 {
     class Program
     {
+        // The folder name where the temp files will be created
         private const string TempFolderName = "temp";
 
         // Number max of rows for each query we send to Azure Table
-        private const int MaxNumberOfRowsForEachQuery = 10000;
+        private const int MaxNumberOfRowsForEachQuery = 100000;
 
         // Max number of delete command for each transaction
         private const int ChunkSizeForTransaction = 100;
 
         // Max number of rows in each temporary file
-        private const int ChunkSizeForTempFile = 1000;
+        private const int ChunkSizeForTempFile = 10000;
+
+        private static ILogger _logger = LogManager.GetCurrentClassLogger();
 
         // The complete path to the temp folder
         private static string TempFolderPath
@@ -27,15 +30,59 @@ namespace AzureTableCleaner
             get { return Environment.CurrentDirectory + "\\" + TempFolderName; }
         }
 
+        /// <summary>
+        /// Gets a value indicating whether this instance is using azure storage emulator.
+        /// </summary>
+        /// <value>
+        /// <c>true</c> if this instance is using azure storage emulator; otherwise, <c>false</c>.
+        /// </value>
+        private static bool IsUsingAzureStorageEmulator
+        {
+            get
+            {
+                var connectionString = CloudConfigurationManager.GetSetting("StorageConnectionString");
+                return connectionString.Contains("UseDevelopmentStorage");
+            }
+        }
+
         static void Main(string[] args)
         {
+            // The code parse the options args but it doesn't use them actually
             var options = ParseArgs(args);
 
             ValidateOptions(options);
+            CloudTable table = GetCloudTable(options);
 
+            // Uncomment the following line to create some dummy rows
+            // Useful for testing purpose in the Azure Storage Emulator
+            //CreateDummyData(table, 200);
+
+            while (true)
+            {
+                // First, we need to check if there are some temp files waiting to be processed
+                ProcessTempFiles(table);
+
+                // Retrieve the data from the Azure table and create the temp files
+                _logger.Trace("Reading data from Azure Table");
+                var rows = RetrieveDataFromAzure(table);
+                _logger.Trace("Found {0} rows (limit {1})", rows.Length, MaxNumberOfRowsForEachQuery);
+                if (!rows.Any())
+                {
+                    _logger.Trace("No more rows to process. Exiting.....");
+                    break;
+                }
+
+                // Store the rows in temp files
+                _logger.Trace("Start writing data in temp files");
+                StoreRowsInTempFiles(rows);
+            }
+        }
+
+        private static CloudTable GetCloudTable(Options options)
+        {
             // Create the storage account
             string connectionString;
-            if( options.UseDeveloperEnvironment )
+            if (options.UseDeveloperEnvironment)
             {
                 connectionString = CloudConfigurationManager.GetSetting("StorageConnectionString");
             }
@@ -50,45 +97,26 @@ namespace AzureTableCleaner
             // Create the table client and prepare the access to the SystemAlerts table
             var tableClient = storageAccount.CreateCloudTableClient();
             var table = tableClient.GetTableReference("SystemAlerts");
-
-            //CreateDummyData(table, 200);
-
-            while (true)
-            {
-                // First, we need to check if there are some temp files waiting to be processed
-                ProcessTempFiles();
-
-                // Retrieve the data from the Azure table and create the temp files
-                Log("Reading data from Azure Table");
-                var rows = RetrieveDataFromAzure(table);
-                if (!rows.Any())
-                {
-                    break;
-                }
-
-                // Store the rows in temp files
-                Log("Start writing data in tem files");
-                StoreRowsInTempFiles(rows);
-            }
-
-            //CleanTable(table);
+            return table;
         }
 
-        private static void ProcessTempFiles()
+        private static void ProcessTempFiles(CloudTable table)
         {
             // Get the list of the file in the temp directory
             var tempFileList = Directory.GetFiles(TempFolderPath, "*.csv");
 
             foreach(var tempFile in tempFileList)
             {
-                var fileProcessor = new TempFileProcessor(tempFile, ChunkSizeForTransaction);
+                _logger.Trace("Processing file " + tempFile);
+                var fileProcessor = new TempFileProcessor(tempFile, ChunkSizeForTransaction, table);
                 fileProcessor.Process();
-            }
-        }
 
-        private static void ProcessTempFile(string tempFile)
-        {
-            
+                _logger.Trace("The file " + tempFile + " has been processed");
+
+                // Delete the file that has been just processed
+                _logger.Trace("Deleting file " + tempFile);
+                File.Delete(tempFile);
+            }
         }
 
         private static SystemAlertsTableRow[] RetrieveDataFromAzure(CloudTable table)
@@ -118,7 +146,6 @@ namespace AzureTableCleaner
             // 2. for each group:
             //      2a. build chunks of N rows
             //      2b. write each chunk in a separate temp file
-
             var groupsByPartitionKey = from row in rows
                                        group row by row.PartitionKey into grp
                                        select new RowsGroup { Key = grp.Key, Rows = grp.ToArray() };
@@ -154,6 +181,8 @@ namespace AzureTableCleaner
                 Directory.CreateDirectory(TempFolderPath);
 
                 var tempFileWithPath = Path.Combine(TempFolderPath, tempFileName);
+
+                _logger.Trace("Wrinting {0} rows in {1}", groupForTempFile.Rows.Length, tempFileWithPath);
 
                 using (var streamWriter = new StreamWriter(tempFileWithPath))
                 {
@@ -209,67 +238,13 @@ namespace AzureTableCleaner
             return options;
         }
 
-        private static void CleanTable(CloudTable table)
-        {
-            
-
-            //var rows = table.ExecuteQuery(query).ToArray();
-
-            //var chunks = GroupRows(rows, chunckSizeForFile);
-
-            //var accumulatedCounter = 0;
-            //foreach(var chunk in chunks)
-            //{
-            //    Console.WriteLine("Deleting {0} rows. {1}/{2}", chunk.Length, accumulatedCounter, rows.Length);
-            //    //DeleteRows(chunk, table);
-            //    WriteRowChunkInTempFile(chunk);
-            //    accumulatedCounter += chunk.Length;
-            //}
-        }
-
-        private static void WriteRowChunkInTempFile(SystemAlertsTableRow[] chunk)
-        {
-            // Create the temp folder if it not exists
-            Directory.CreateDirectory(TempFolderName);
-            var tempFileName = Path.GetRandomFileName();
-            var tempFilePath = Path.Combine(Environment.CurrentDirectory + "\\" + TempFolderName, tempFileName);
-
-            using (var file = File.CreateText(tempFilePath))
-            {
-                Log(string.Format("Writing {0} rows in file {1}", chunk.Length, tempFilePath));
-                foreach(var item in chunk)
-                {
-                    // Write on file onlye PartitionKey and RowKey
-                    file.WriteLine(item.PartitionKey + ";" + item.RowKey);
-                }
-            }
-        }
-
-        //private static SystemAlertsTableRow[][] GroupRows(IEnumerable<SystemAlertsTableRow> rows, int groupSize)
-        //{
-        //    var items = rows
-        //        .Select((item, index) => new { Item = item, GroupIndex = index / groupSize })
-        //        .GroupBy(item => item.GroupIndex)
-        //        .Select(group => group.Select(item => item.Item).ToArray())
-        //        .ToArray();
-        //    return items;
-        //}
-
-        private static void DeleteRows(SystemAlertsTableRow[] rows, CloudTable table)
-        {
-            var batchOperation = new TableBatchOperation();
-            foreach(var row in rows)
-            {
-                var tableEntity = new TableEntity(row.PartitionKey, row.RowKey);
-                tableEntity.ETag = "*";
-                batchOperation.Delete(tableEntity);
-            }
-
-            table.ExecuteBatch(batchOperation);
-        }
-
         private static void CreateDummyData(CloudTable table, int numberOfRows)
         {
+            if( !IsUsingAzureStorageEmulator)
+            {
+                throw new InvalidOperationException("You cannot create dummy data if you are not referencing the local Azure Storage Emulator");
+            }
+
             table.CreateIfNotExists();
 
             for(int i = 0; i < numberOfRows; i++)
@@ -280,15 +255,9 @@ namespace AzureTableCleaner
                     Timestamp = DateTime.Now
                 };
                 var operation = TableOperation.Insert(entity);
-                Log("Creating dummy item #" + i);
+                _logger.Trace("Creating dummy item #" + i);
                 table.Execute(operation);
             }
-        }
-
-        private static void Log(string message)
-        {
-            var text = string.Format("[{0}] - {1}", DateTime.Now.ToString(), message);
-            Console.WriteLine(text);
         }
     }
 }
