@@ -3,6 +3,7 @@ using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Table;
 using NLog;
 using System;
+using System.Configuration;
 using System.IO;
 using System.Linq;
 
@@ -13,16 +14,16 @@ namespace AzureTableCleaner
         // The folder name where the temp files will be created
         private const string TempFolderName = "temp";
 
-        // Number max of rows for each query we send to Azure Table
-        private const int MaxNumberOfRowsForEachQuery = 100000;
+        // Number max of results for each query we send to Azure Table
+        private static readonly int _maxNumberOfRowsForEachQuery = int.Parse(ConfigurationManager.AppSettings["MaxNumberOfRowsForEachQuery"]);
 
         // Max number of delete command for each transaction
-        private const int ChunkSizeForTransaction = 100;
+        private static readonly int _chunkSizeForTransaction = int.Parse(ConfigurationManager.AppSettings["ChunkSizeForTransaction"]);
 
         // Max number of rows in each temporary file
-        private const int ChunkSizeForTempFile = 10000;
+        private static readonly int _chunkSizeForTempFile = int.Parse(ConfigurationManager.AppSettings["ChunkSizeForTempFile"]);
 
-        private static ILogger _logger = LogManager.GetCurrentClassLogger();
+        private static readonly ILogger _logger = LogManager.GetCurrentClassLogger();
 
         // The complete path to the temp folder
         private static string TempFolderPath
@@ -65,7 +66,7 @@ namespace AzureTableCleaner
                 // Retrieve the data from the Azure table and create the temp files
                 _logger.Trace("Reading data from Azure Table");
                 var rows = RetrieveDataFromAzure(table);
-                _logger.Trace("Found {0} rows (limit {1})", rows.Length, MaxNumberOfRowsForEachQuery);
+                _logger.Trace("Found {0} rows (limit {1})", rows.Length, _maxNumberOfRowsForEachQuery);
                 if (!rows.Any())
                 {
                     _logger.Trace("No more rows to process. Exiting.....");
@@ -108,7 +109,7 @@ namespace AzureTableCleaner
             foreach(var tempFile in tempFileList)
             {
                 _logger.Trace("Processing file " + tempFile);
-                var fileProcessor = new TempFileProcessor(tempFile, ChunkSizeForTransaction, table);
+                var fileProcessor = new TempFileProcessor(tempFile, _chunkSizeForTransaction, table);
                 fileProcessor.Process();
 
                 _logger.Trace("The file " + tempFile + " has been processed");
@@ -124,7 +125,7 @@ namespace AzureTableCleaner
             // Construct the projectionQuery to get only "PartitionKey", "RowKey" and "Timestamp"
             TableQuery<DynamicTableEntity> projectionQuery = new TableQuery<DynamicTableEntity>()
                 .Where(TableQuery.GenerateFilterConditionForDate("Timestamp", QueryComparisons.LessThan, DateTime.Now.Date.AddMonths(-1)))
-                .Take(MaxNumberOfRowsForEachQuery)
+                .Take(_maxNumberOfRowsForEachQuery)
                 .Select(new string[] { "PartitionKey", "RowKey", "Timestamp" });
 
             // Define an entiy resolver to work with the entity after retrieval
@@ -167,7 +168,7 @@ namespace AzureTableCleaner
 
             // We split the row group in separate temp files
             var groupsForTempFiles = from row in rowsWithIndex
-                                     group row by row.Index / ChunkSizeForTempFile into grp
+                                     group row by row.Index / _chunkSizeForTempFile into grp
                                      select new { GroupIndex = grp.Key, Rows = grp.ToArray() };
 
             // Fro each group, let's build a temp file where store
