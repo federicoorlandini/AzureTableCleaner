@@ -1,4 +1,5 @@
 ﻿using Microsoft.WindowsAzure.Storage.Table;
+using NLog;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -15,12 +16,14 @@ namespace AzureTableCleaner
         private readonly string _pathToTempFile;
         private readonly int _transactionChunkSize;
         private readonly CloudTable _table;
-
-        public TempFileProcessor(string pathToTheTempFile, int transactionChunckSize, CloudTable table)
+        private readonly ILogger _logger;
+         
+        public TempFileProcessor(string pathToTheTempFile, int transactionChunckSize, CloudTable table, ILogger logger)
         {
             _pathToTempFile = pathToTheTempFile;
             _transactionChunkSize = transactionChunckSize;
             _table = table;
+            _logger = logger;
         }
 
         public void Process()
@@ -48,6 +51,8 @@ namespace AzureTableCleaner
             }
 
             Task.WaitAll(tasks.ToArray());
+
+            _logger.Trace("{0} rows has been deleted", rows.Count);
         }
 
         private void DeleteRows(SystemAlertsTableRow[] rows, CloudTable table)

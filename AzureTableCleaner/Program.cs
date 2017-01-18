@@ -76,6 +76,9 @@ namespace AzureTableCleaner
                 // Store the rows in temp files
                 _logger.Trace("Start writing data in temp files");
                 StoreRowsInTempFiles(rows);
+
+                // Let's process the temp files already created
+                ProcessTempFiles(table);
             }
         }
 
@@ -101,15 +104,20 @@ namespace AzureTableCleaner
             return table;
         }
 
+        private static string[] GetTempFiles()
+        {
+            return Directory.GetFiles(TempFolderPath, "*.csv");
+        }
+
         private static void ProcessTempFiles(CloudTable table)
         {
             // Get the list of the file in the temp directory
-            var tempFileList = Directory.GetFiles(TempFolderPath, "*.csv");
+            var tempFileList = GetTempFiles();
 
             foreach(var tempFile in tempFileList)
             {
                 _logger.Trace("Processing file " + tempFile);
-                var fileProcessor = new TempFileProcessor(tempFile, _chunkSizeForTransaction, table);
+                var fileProcessor = new TempFileProcessor(tempFile, _chunkSizeForTransaction, table, _logger);
                 fileProcessor.Process();
 
                 _logger.Trace("The file " + tempFile + " has been processed");
