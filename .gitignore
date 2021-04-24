@@ -45,7 +45,7 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
-AzureTableCleaner/.vs/AzureTableCleaner/v14/.suo
-AzureTableCleaner/bin/
-AzureTableCleaner/obj/
-AzureTableCleaner/packages/
+AzureTableCleanerCore.Tests/bin/
+AzureTableCleanerCore.Tests/obj/
+AzureTableCleanerCore/bin/
+AzureTableCleanerCore/obj/
